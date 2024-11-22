@@ -57,7 +57,7 @@ function convert_adjmat_to_string(adjmat::Matrix{Int})::String
         for j in i+1:N
             push!(entries, string(adjmat[i, j]))
         end
-        push!(entries,"2")
+        push!(entries,",")
     end
 
     # Join all entries into a single string
@@ -82,6 +82,7 @@ function greedy_search_from_startpoint(db, obj::OBJ_TYPE, additional_loops=0)::V
     Greedily remove edges to destroy all triangles, then greedily add edges without creating triangles
     Returns final maximal triangle-free graph
     """
+
     num_commas = count(c -> c == ',', obj)
     if num_commas != N - 1
         return greedy_search_from_startpoint(db, empty_starting_point())

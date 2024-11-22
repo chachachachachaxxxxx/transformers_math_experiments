@@ -26,10 +26,10 @@ def get_parser():
     parser = argparse.ArgumentParser('Generate training sample of low braids via reservoir sampling')
     # JULIA params
     
-    parser.add_argument('--num_initial_empty_objects', type=int, default=500000, help='number of initial rollouts, before the first learning loop')
-    parser.add_argument('--final_database_size', type=int, default=50000, help='training set size')
-    parser.add_argument('--target_db_size', type=int, default=500000, help='size of cache during local search loop, should be larger than training set size')
-    parser.add_argument('--sample-only', type=int, default=500000, help="sample the specified number from the model in each loop")
+    parser.add_argument('--num_initial_empty_objects', type=int, default=50000, help='number of initial rollouts, before the first learning loop')
+    parser.add_argument('--final_database_size', type=int, default=5000, help='training set size')
+    parser.add_argument('--target_db_size', type=int, default=50000, help='size of cache during local search loop, should be larger than training set size')
+    parser.add_argument('--sample-only', type=int, default=50000, help="sample the specified number from the model in each loop")
     parser.add_argument('--nb_threads', type=int, default=1, help='Number of cpu threads')
     parser.add_argument('--nb_local_searches', type=int, default=1200, help='This only matters when using multithreading, then it should be a multiple of the number of threads used')
     
@@ -278,6 +278,8 @@ if __name__ == '__main__':
         os.environ["JULIA_NUM_THREADS"] = str(args.nb_threads)  # Set the environment variable
         logger.info(f"JULIA_NUM_THREADS is set to {os.environ['JULIA_NUM_THREADS']}")
         subprocess.run(["julia","search_fc.jl", args.dump_path, str(args.nb_local_searches), str(args.num_initial_empty_objects), str(args.final_database_size), str(args.target_db_size)])
+        # 运行的默认命令是
+        # julia search_fc.jl 'checkpoint\\debug\\g7o3tlbzwp' 1200 500000 50000 500000
         tokenize(f"{args.dump_path}/search_output_1.txt", args.n_tokens)
         initial_gen = 1
     
