@@ -1,6 +1,6 @@
 include("constants.jl")
 
-const N = 10
+const N = 20
 
 function find_all_triangles(adjmat::Matrix{Int})
     N = size(adjmat, 1)
@@ -20,8 +20,6 @@ function find_all_triangles(adjmat::Matrix{Int})
     return triangles
 end
 
-
-
 function convert_adjmat_to_string(adjmat::Matrix{Int})::String
     entries = []
 
@@ -30,13 +28,14 @@ function convert_adjmat_to_string(adjmat::Matrix{Int})::String
         for j in i+1:N
             push!(entries, string(adjmat[i, j]))
         end
+        push!(entries, ",")
     end
 
     # Join all entries into a single string
     return join(entries)
 end
 
-function greedy_search_from_startpoint(db, obj::OBJ_TYPE)::OBJ_TYPE
+function greedy_search_from_startpoint(db, obj::OBJ_TYPE)::Vector{OBJ_TYPE}
     """
     Main greedy search algorithm. 
     It starts and ends with some construction 
@@ -45,13 +44,20 @@ function greedy_search_from_startpoint(db, obj::OBJ_TYPE)::OBJ_TYPE
     Greedily remove edges to destroy all triangles, then greedily add edges without creating triangles
     Returns final maximal triangle-free graph
     """
+    num_commas = count(c -> c == ',', obj)
+    if num_commas != N - 1
+        return greedy_search_from_startpoint(db, empty_starting_point())
+    end
 
     adjmat = zeros(Int, N, N)
-
+    
     # Fill the upper triangular matrix
     index = 1
     for i in 1:N-1
         for j in i+1:N
+            while obj[index] == ','
+                index += 1
+            end
             adjmat[i, j] = parse(Int, obj[index])  # Convert character to integer
             adjmat[j, i] = adjmat[i, j]  # Make the matrix symmetric
             index += 1
@@ -148,7 +154,7 @@ function greedy_search_from_startpoint(db, obj::OBJ_TYPE)::OBJ_TYPE
 
 
     end
-    return convert_adjmat_to_string(adjmat)
+    return [convert_adjmat_to_string(adjmat)]
 end
 
 function reward_calc(obj::OBJ_TYPE)::REWARD_TYPE
@@ -165,5 +171,7 @@ function empty_starting_point()::OBJ_TYPE
     If there is no input file, the search starts always with this object
     (E.g. empty graph, all zeros matrix, etc)
     """
-    return "0" ^ (N * (N - 1) ÷ 2 )
+    adjmat = zeros(Int, N, N)
+
+    return convert_adjmat_to_string(adjmat)
 end

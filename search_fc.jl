@@ -11,9 +11,9 @@ using Dates
 
 # Choose the problem to work on here!
 
-#include("problem_triangle_free.jl")  
-include("problem_4_cycle_free.jl")
-#include("problem_permanent_avoid_123.jl")
+include("problem_triangle_free.jl")  
+# include("problem_4_cycle_free.jl")
+# include("problem_permanent_avoid_123.jl")
 
 
 #########################################################################################
@@ -151,6 +151,8 @@ function initial_lines()
         println("Using input file")
         open(input_file, "r") do file
             for line in eachline(file)
+                # 只添加合法的输入
+                # 可能会导致数量少于num_initial_empty_objects，此处会过滤不合法的输入
                 if length(line) == length(empty_starting_point())
                     push!(lines, line)  # Add each line to the vector
                 end
@@ -219,6 +221,14 @@ function local_search!(db, lines, start_ind, nb=nb_local_searches)
     # prepare local search pool
     count = 0
     pool = OBJ_TYPE[]
+    # if any(x -> typeof(x) == Char, lines)
+    #     println("There are elements of type Char in lines.")
+    # end
+    # for (i, x) in enumerate(lines)
+    #     if typeof(x) == Char
+    #         println("Found Char at index $i: $x")
+    #     end
+    # end
     append!(pool, lines[start_ind:min(start_ind + nb - 1,length(lines))])
     # we perform the local searches
     @threads for obj in pool
@@ -341,6 +351,7 @@ function main()
     start_idx = 1
     steps::Int = 0
     time_since_previous_output = 0
+    # 首先如果没有初始输入，则会生成num_initial_empty_objects个空对象
     while start_idx < length(lines)
         time_local_search = @elapsed local_search!(db, lines, start_idx)
         time_since_previous_output += time_local_search

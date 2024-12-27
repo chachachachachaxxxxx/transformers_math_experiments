@@ -17,7 +17,7 @@
             "name": "Run search_fc.jl", // 调试任务名称
             "program": "${workspaceFolder}/search_fc.jl", // 指定要运行的 Julia 脚本
             "args": [
-                "checkpoint\\debug\\g7o3tlbzwp",
+                "checkpoint\\debug\\mlz0g5fpsz",
                 "1200",
                 "5000",
                 "5000",
