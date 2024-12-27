@@ -16,6 +16,8 @@ from torch.utils.data import Dataset
 from torch.utils.data.dataloader import DataLoader
 from dataclasses import dataclass
 from typing import List
+from torch.utils.tensorboard import SummaryWriter
+
 
 from makemoretokens import ModelConfig, CharDataset, Transformer, Bigram, MLP, RNN, BoW, InfiniteDataLoader, evaluate, generate
 import os
@@ -26,38 +28,47 @@ def get_parser():
     parser = argparse.ArgumentParser('Generate training sample of low braids via reservoir sampling')
     # JULIA params
     
-    parser.add_argument('--num_initial_empty_objects', type=int, default=50000, help='number of initial rollouts, before the first learning loop')
-    parser.add_argument('--final_database_size', type=int, default=5000, help='training set size')
-    parser.add_argument('--target_db_size', type=int, default=50000, help='size of cache during local search loop, should be larger than training set size')
-    parser.add_argument('--sample-only', type=int, default=50000, help="sample the specified number from the model in each loop")
-    parser.add_argument('--nb_threads', type=int, default=1, help='Number of cpu threads')
-    parser.add_argument('--nb_local_searches', type=int, default=1200, help='This only matters when using multithreading, then it should be a multiple of the number of threads used')
+    parser.add_argument('--num_initial_empty_objects', type=int, default=5000, help='number of initial rollouts, before the first learning loop')
+    parser.add_argument('--final_database_size', type=int, default=10000, help='training set size')
+    parser.add_argument('--target_db_size', type=int, default=10000, help='size of cache during local search loop, should be larger than training set size')
+    # 每一次生成的数量
+    parser.add_argument('--sample-only', type=int, default=5000, help="sample the specified number from the model in each loop")
+    parser.add_argument('--nb_threads', type=int, default=8, help='Number of cpu threads')
+    parser.add_argument('--nb_local_searches', type=int, default=5000, help='This only matters when using multithreading, then it should be a multiple of the number of threads used')
     
-
     # Makemore params
     parser.add_argument('--num-workers', '-n', type=int, default=8, help="number of data workers for both train/test")
-    parser.add_argument('--max-steps', type=int, default=20000, help="max number of optimization steps to run for, or -1 for infinite.")
-    parser.add_argument('--max_epochs', type=int, default= 30000, help='number of epochs')
-    parser.add_argument('--seed', type=int, default=-1, help="seed")
+    parser.add_argument('--max-steps', type=int, default=10000, help="max number of optimization steps to run for, or -1 for infinite.")
+    parser.add_argument('--max_epochs', type=int, default=200, help='number of epochs')
+    parser.add_argument('--seed', type=int, default=42, help="seed")
     # sampling
     parser.add_argument('--top-k', type=int, default=-1, help="top-k for sampling, -1 means no top-k")
+
     # model
+    # parser.add_argument('--type', type=str, default='transformer', help="model class type to use, bigram|mlp|rnn|gru|bow|transformer")
+    # parser.add_argument('--n-layer', type=int, default=4, help="number of layers")
+    # parser.add_argument('--n-head', type=int, default=4, help="number of heads (in a transformer)")
+    # parser.add_argument('--n-embd', type=int, default=128, help="number of feature channels in the model")
+    # parser.add_argument('--n-embd2', type=int, default=32, help="number of feature channels elsewhere in the model")
+
     parser.add_argument('--type', type=str, default='transformer', help="model class type to use, bigram|mlp|rnn|gru|bow|transformer")
-    parser.add_argument('--n-layer', type=int, default=4, help="number of layers")
-    parser.add_argument('--n-head', type=int, default=8, help="number of heads (in a transformer)")
-    parser.add_argument('--n-embd', type=int, default=64, help="number of feature channels in the model")
+    parser.add_argument('--n-layer', type=int, default=2, help="number of layers")
+    parser.add_argument('--n-head', type=int, default=4, help="number of heads (in a transformer)")
+    parser.add_argument('--n-embd', type=int, default=16, help="number of feature channels in the model")
     parser.add_argument('--n-embd2', type=int, default=32, help="number of feature channels elsewhere in the model")
+
     # optimization
-    parser.add_argument('--batch-size', '-b', type=int, default=32, help="batch size during optimization")
+    parser.add_argument('--batch-size', '-b', type=int, default=64, help="batch size during optimization")
     parser.add_argument('--learning-rate', '-l', type=float, default=5e-4, help="learning rate")
     parser.add_argument('--weight-decay', '-w', type=float, default=0.01, help="weight decay")
     # evaluation against known "good sequences"
     parser.add_argument('--max-output-length', type=int, default=160, help="maximum output length")
-    parser.add_argument('--gen_batch_size', type=int, default=1000, help="generation batch size")
+    parser.add_argument('--gen_batch_size', type=int, default=500, help="generation batch size")
+    # BPE词表大小
     parser.add_argument('--n_tokens', type=int, default=100, help="nr tokens in tokenizer")
     parser.add_argument('--temperature', type=float, default=1.0, help="temperature")
     
-
+    # 下列参数不用修改，使用默认值即可
     # path and ports
     parser.add_argument("--dump_path", type=str, default="checkpoint",
                         help="Experiment dump path")
@@ -153,6 +164,7 @@ def decode():
 
     # Process the input file
     input_file = args.dump_path+"/out.txt"
+    # 这个input file是啥
     if os.path.exists(input_file):
         with open(input_file, 'r') as file:
             tokenized_lines = file.readlines()
@@ -250,6 +262,9 @@ def write_samples(num=10, new_file=False, use_logger=False):
 
 
 if __name__ == '__main__':
+    # Initialize TensorBoard SummaryWriter
+    writer = SummaryWriter(log_dir=os.path.join(args.dump_path, "runs"))
+    
     parser = get_parser()
     args = parser.parse_args()
     init_distributed_mode(args)
@@ -270,16 +285,20 @@ if __name__ == '__main__':
     # os.makedirs(args.work_dir, exist_ok=True)
 
     # init datasets
+    # 这里似乎是继续训练的意思
+    # 循环检查每一代的tokenized数据是否存在。如果某一代的数据不存在，则停止。initial_gen代表当前的初始代数
     for i in range(1,args.max_epochs):
         if not os.path.isfile(f"{args.dump_path}/search_output_{i}-tokenized.txt"):
             break
     initial_gen = i-1
+
     if initial_gen == 0:
         os.environ["JULIA_NUM_THREADS"] = str(args.nb_threads)  # Set the environment variable
         logger.info(f"JULIA_NUM_THREADS is set to {os.environ['JULIA_NUM_THREADS']}")
         subprocess.run(["julia","search_fc.jl", args.dump_path, str(args.nb_local_searches), str(args.num_initial_empty_objects), str(args.final_database_size), str(args.target_db_size)])
         # 运行的默认命令是
         # julia search_fc.jl 'checkpoint\\debug\\g7o3tlbzwp' 1200 500000 50000 500000
+        # 生成local search编码后的结果
         tokenize(f"{args.dump_path}/search_output_1.txt", args.n_tokens)
         initial_gen = 1
     
@@ -288,6 +307,7 @@ if __name__ == '__main__':
     train_dataset, test_dataset = create_datasets(input_file)
     vocab_size = args.n_tokens + 1
     block_size = args.max_output_length + 1
+    # 这里词表和最大输出长度都加了1，应该表示的是开始符号
     logger.info(f"dataset determined that: {vocab_size=}, {block_size=}")
 
     # init model
@@ -393,7 +413,9 @@ if __name__ == '__main__':
         tot_n = 0
         tot_sum = 0
         tot_max = 0
+        # outfile记录了本轮的编码输出
         out_file = args.dump_path + "/out.txt"
+        # infile是这个local_search输出编码后的文件
         in_file = args.dump_path + f"/search_output_{generation}-tokenized.txt"
         #infilz = f"{args.dump_path}/search_output_{generation}.txt"
         with open(in_file, 'r') as f:
@@ -403,9 +425,12 @@ if __name__ == '__main__':
             for word in words:
                 file.write(word)
                 file.write("\n")
+        # 把input的输入先记录到output里
         while sample_batch_size < todo:
-            if todo % 50000 ==0 : 
+            if todo % 1000 ==0 : 
                 logger.info(f'{todo} samples remaining')
+            # 这里的sm 和mx是decode之后的长度计数
+            # 这里的长度包含了token中的逗号
             n, sm, mx = write_samples(num=sample_batch_size)
             tot_n+=n
             tot_sum+=sm
