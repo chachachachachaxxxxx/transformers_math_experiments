@@ -14,12 +14,13 @@ import torch.nn as nn
 from torch.nn import functional as F
 from torch.utils.data import Dataset
 from torch.utils.data.dataloader import DataLoader
-from dataclasses import dataclass
-from typing import List
 from torch.utils.tensorboard import SummaryWriter
 
 
-from makemoretokens import ModelConfig, CharDataset, Transformer, Bigram, MLP, RNN, BoW, InfiniteDataLoader, evaluate, generate
+from dataclasses import dataclass
+from typing import List
+
+from makemoretokens import ModelConfig, CharDataset, Transformer, Bigram, MLP, RNN, BoW, InfiniteDataLoader, evaluate, generate, RotaryTransformer
 import os
 import argparse
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -28,9 +29,9 @@ def get_parser():
     parser = argparse.ArgumentParser('Generate training sample of low braids via reservoir sampling')
     # JULIA params
     
-    parser.add_argument('--num_initial_empty_objects', type=int, default=5000, help='number of initial rollouts, before the first learning loop')
+    parser.add_argument('--num_initial_empty_objects', type=int, default=10000, help='number of initial rollouts, before the first learning loop')
     parser.add_argument('--final_database_size', type=int, default=10000, help='training set size')
-    parser.add_argument('--target_db_size', type=int, default=10000, help='size of cache during local search loop, should be larger than training set size')
+    parser.add_argument('--target_db_size', type=int, default=20000, help='size of cache during local search loop, should be larger than training set size')
     # 每一次生成的数量
     parser.add_argument('--sample-only', type=int, default=5000, help="sample the specified number from the model in each loop")
     parser.add_argument('--nb_threads', type=int, default=8, help='Number of cpu threads')
@@ -63,7 +64,7 @@ def get_parser():
     parser.add_argument('--weight-decay', '-w', type=float, default=0.01, help="weight decay")
     # evaluation against known "good sequences"
     parser.add_argument('--max-output-length', type=int, default=160, help="maximum output length")
-    parser.add_argument('--gen_batch_size', type=int, default=500, help="generation batch size")
+    parser.add_argument('--gen_batch_size', type=int, default=250, help="generation batch size")
     # BPE词表大小
     parser.add_argument('--n_tokens', type=int, default=100, help="nr tokens in tokenizer")
     parser.add_argument('--temperature', type=float, default=1.0, help="temperature")
@@ -262,13 +263,16 @@ def write_samples(num=10, new_file=False, use_logger=False):
 
 
 if __name__ == '__main__':
-    # Initialize TensorBoard SummaryWriter
-    writer = SummaryWriter(log_dir=os.path.join(args.dump_path, "runs"))
-    
     parser = get_parser()
     args = parser.parse_args()
+    
     init_distributed_mode(args)
+    # 这个函数修改了args中的dump_path
     logger = initialize_exp(args)
+
+    # Initialize TensorBoard SummaryWriter
+    writer = SummaryWriter(log_dir=os.path.join(args.dump_path,  "runs"))
+
     if not os.path.exists(args.dump_path):
         os.makedirs(args.dump_path)
     if args.is_slurm_job:
@@ -292,6 +296,8 @@ if __name__ == '__main__':
             break
     initial_gen = i-1
 
+    
+
     if initial_gen == 0:
         os.environ["JULIA_NUM_THREADS"] = str(args.nb_threads)  # Set the environment variable
         logger.info(f"JULIA_NUM_THREADS is set to {os.environ['JULIA_NUM_THREADS']}")
@@ -314,7 +320,9 @@ if __name__ == '__main__':
     config = ModelConfig(vocab_size=vocab_size, block_size=block_size,
                        n_layer=args.n_layer, n_head=args.n_head,
                        n_embd=args.n_embd, n_embd2=args.n_embd2)
-    if args.type == 'transformer':
+    if args.type == 'RotaryTransformer':
+        model = RotaryTransformer(config)
+    elif args.type == 'transformer':
         model = Transformer(config)
     elif args.type == 'bigram':
         model = Bigram(config)
@@ -352,6 +360,10 @@ if __name__ == '__main__':
         # training loop
         best_loss = None
         step = 0
+
+        epoch_train_loss = 0.0  # Track total train loss for the current epoch
+        epoch_test_loss = 0.0   # Track total test loss for the current epoch
+        
         while True:
 
             t0 = time.time()
@@ -392,6 +404,10 @@ if __name__ == '__main__':
             if step > 0 and step % 500 == 0:
                 train_loss = evaluate(model, train_dataset, args.device, batch_size=100, max_batches=10)
                 test_loss  = evaluate(model, test_dataset,  args.device, batch_size=100, max_batches=10)
+
+                epoch_train_loss += train_loss
+                epoch_test_loss += test_loss
+
                 logger.info(f"step {step} train loss: {train_loss} test loss: {test_loss}")
                 # save the model to disk if it has improved
                 if best_loss is None or test_loss < best_loss:
@@ -405,6 +421,15 @@ if __name__ == '__main__':
             # termination conditions
             if args.max_steps >= 0 and step >= args.max_steps:
                 break
+        
+        # After each epoch, log the average train and test loss
+        avg_train_loss = epoch_train_loss / (step / 500)
+        avg_test_loss = epoch_test_loss / (step / 500)
+        
+        # Log train_loss and test_loss for the epoch to TensorBoard
+        writer.add_scalar('Loss/train', avg_train_loss, generation)
+        writer.add_scalar('Loss/test', avg_test_loss, generation)
+
         logger.info(f"Memory allocated:  {torch.cuda.memory_allocated(0)/(1024*1024):.2f}MB, reserved: {torch.cuda.memory_reserved(0)/(1024*1024):.2f}MB")
 
         logger.info('generating')

@@ -157,6 +157,191 @@ class Transformer(nn.Module):
 
         return logits, loss
 
+class RotaryPositionEmbedding(nn.Module):
+    """
+    Rotary Position Embedding (RoPE) as described in the paper:
+    https://arxiv.org/abs/2205.12778
+    """
+    def __init__(self, dim):
+        super().__init__()
+        self.dim = dim
+
+    def forward(self, x, position_ids):
+        # Calculate the sinusoidal encoding of positions
+        seq_len = position_ids.size(1)
+        angle_rates = 1.0 / (10000 ** (torch.arange(0, self.dim, 2).float() / self.dim))  # Even dimensions
+        angle_rates = angle_rates.to(x.device)
+
+        # Get position encoding
+        sinusoid_inp = torch.outer(position_ids, angle_rates)
+        sin_emb = torch.sin(sinusoid_inp)
+        cos_emb = torch.cos(sinusoid_inp)
+        position_embeddings = torch.stack([sin_emb, cos_emb], dim=-1).view(seq_len, self.dim)
+
+        # Apply rotary position encoding to input tensor (query and key)
+        return position_embeddings.unsqueeze(0).expand(x.size(0), -1, -1)
+
+class RotaryEmbedding(torch.nn.Module):
+    def __init__(self, dim, max_position_embeddings=2048, base=10000, device=None):
+        super().__init__()
+        # TODO dim=128, max_position_embeddings=4096, 远程衰减
+        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float().to(device) / dim))
+        self.register_buffer("inv_freq", inv_freq)
+
+        # Build here to make `torch.jit.trace` work.
+        self.max_seq_len_cached = max_position_embeddings
+        # 4096
+        t = torch.arange(self.max_seq_len_cached, device=self.inv_freq.device, dtype=self.inv_freq.dtype)
+        freqs = torch.einsum("i,j->ij", t, self.inv_freq)
+        # Different from paper, but it uses a different permutation in order to obtain the same calculation
+        # [4096, 64] => [4096, 128]
+        emb = torch.cat((freqs, freqs), dim=-1)
+        # TODO [1, 1, 4096, 128]
+        self.register_buffer("cos_cached", emb.cos()[None, None, :, :], persistent=False)
+        self.register_buffer("sin_cached", emb.sin()[None, None, :, :], persistent=False)
+
+    def forward(self, x, seq_len=None):
+        ...
+        return (
+            # TODO [1, 1, seq_len, emb_size=128]
+            self.cos_cached[:, :, :seq_len, ...].to(dtype=x.dtype),
+            self.sin_cached[:, :, :seq_len, ...].to(dtype=x.dtype),
+        )
+
+def apply_rotary_pos_emb(q, k, cos, sin, position_ids):
+    def rotate_half(x):
+        """Rotates half the hidden dims of the input."""
+        # TODO 前64个embedding位置 x=[batch_size, num_heads, seq_len, emb_size] => [batch_size, num_heads, seq_len, emb_size/2]
+        x1 = x[..., : x.shape[-1] // 2]
+        # TODO 后64个embedding位置 x=[batch_size, num_heads, seq_len, emb_size] => [batch_size, num_heads, seq_len, emb_size/2]
+        x2 = x[..., x.shape[-1] // 2 :]
+        # TODO 后64embedding位置取负号，和前64embedding位置拼接
+        return torch.cat((-x2, x1), dim=-1)
+
+    q_embed = (q * cos) + (rotate_half(q) * sin)
+    k_embed = (k * cos) + (rotate_half(k) * sin)
+    return q_embed, k_embed
+
+
+class RotaryCausalSelfAttention(nn.Module):
+    """
+    A vanilla multi-head masked self-attention layer with a projection at the end,
+    enhanced with Rotary Positional Embedding (RoPE) for improved relative position modeling.
+    """
+    def __init__(self, config):
+        super().__init__()
+        assert config.n_embd % config.n_head == 0
+        self.n_embd = config.n_embd
+        self.n_head = config.n_head
+        
+        # Key, query, value projections for all heads, in a batch
+        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd)
+        self.c_proj = nn.Linear(config.n_embd, config.n_embd)
+
+        # Causal mask to ensure that attention is only applied to the left in the input sequence
+        self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
+                                     .view(1, 1, config.block_size, config.block_size))
+        
+        # Rotary position encoding
+        self.rope = RotaryEmbedding(config.n_embd // config.n_head, config.block_size)
+
+    def forward(self, x, position_ids):
+        B, T, C = x.size()
+
+        # Calculate query, key, and values for all heads in batch and move head forward to be the batch dim
+        q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
+        
+        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
+        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
+        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
+
+        cos, sin = self.rope(v, seq_len = T)
+        q, k = apply_rotary_pos_emb(q, k, cos, sin, position_ids)
+        # Apply Rotary Position Encoding to q and k
+        # position_embeddings = self.rope(x, position_ids)
+        # q = q * position_embeddings
+        # k = k * position_embeddings
+
+        # Causal self-attention
+        att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+        att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
+        att = F.softmax(att, dim=-1)
+        
+        y = att @ v  # (B, nh, T, hs)
+        y = y.transpose(1, 2).contiguous().view(B, T, C)  # Re-assemble all head outputs side by side
+
+        y = self.c_proj(y)
+        return y
+
+class RotaryBlock(nn.Module):
+    """ A single transformer block with self-attention and MLP. """
+    def __init__(self, config):
+        super().__init__()
+        # Layer Normalization 1
+        self.ln_1 = nn.LayerNorm(config.n_embd)
+        # Causal Self-Attention Layer (with Rotary Position Embedding)
+        self.attn = RotaryCausalSelfAttention(config)
+        # Layer Normalization 2
+        self.ln_2 = nn.LayerNorm(config.n_embd)
+        # Feedforward MLP
+        self.mlp = nn.ModuleDict(dict(
+            c_fc    = nn.Linear(config.n_embd, 4 * config.n_embd),  # The expansion factor is 4 (like in GPT-2)
+            c_proj  = nn.Linear(4 * config.n_embd, config.n_embd),
+            act     = NewGELU(),  # GELU activation
+        ))
+        # MLP forward pass as a lambda function
+        m = self.mlp
+        self.mlpf = lambda x: m.c_proj(m.act(m.c_fc(x)))  # MLP forward pass
+
+    def forward(self, x, position_ids):
+        # Attention Layer
+        x = x + self.attn(self.ln_1(x), position_ids)  # Add residual connection
+        # MLP Layer
+        x = x + self.mlpf(self.ln_2(x))  # Add residual connection
+        return x
+
+class RotaryTransformer(nn.Module):
+    """
+    Transformer model with Rotary Positional Embedding (RoPE) for improved relative position modeling.
+    """
+    def __init__(self, config):
+        super().__init__()
+        self.block_size = config.block_size
+
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(config.vocab_size, config.n_embd),
+            h = nn.ModuleList([RotaryBlock(config) for _ in range(config.n_layer)]),
+            ln_f = nn.LayerNorm(config.n_embd),
+        ))
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+
+    def get_block_size(self):
+        return self.block_size
+
+    def forward(self, idx, targets=None):
+        device = idx.device
+        b, t = idx.size()
+        assert t <= self.block_size, f"Cannot forward sequence of length {t}, block size is only {self.block_size}"
+        pos = torch.arange(0, t, dtype=torch.long, device=device).unsqueeze(0)  # shape (1, t)
+
+        # Forward the GPT model itself
+        tok_emb = self.transformer.wte(idx)  # Token embeddings of shape (b, t, n_embd)
+        
+        # Add token and position embeddings
+        x = tok_emb
+        for block in self.transformer.h:
+            x = block(x, pos)
+        
+        x = self.transformer.ln_f(x)
+        logits = self.lm_head(x)
+
+        # If we are given some desired targets, also calculate the loss
+        loss = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+
+        return logits, loss
+
 # -----------------------------------------------------------------------------
 # Bag of Words (BoW) language model
 

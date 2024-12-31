@@ -12,6 +12,19 @@
             "console": "integratedTerminal"
         },
         {
+            "name": "Debug RotaryTransformer Script",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/fc_loop.py",
+            "args": [
+              "--type", "RotaryTransformer",
+              "--exp_name", "RotaryTransformerK3free",
+              "--exp_id", "d303avoqc3"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
             "type": "julia", // 指定调试类型为 Julia
             "request": "launch", // 启动类型
             "name": "Run search_fc.jl", // 调试任务名称
@@ -26,4 +39,5 @@
             "cwd": "${workspaceFolder}" // 工作目录，默认为项目根目录
         }
     ]
+    
 }
